@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#101112">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="取景">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/icon-192.png">
+<title>取景助手</title>
+<style>
+  :root{
+    --bg:#101112; --panel:#17191b; --line:rgba(255,255,255,.14);
+    --text:#e8e6e1; --muted:#9aa0a6; --accent:#e9b45b; --ok:#7bbf8a; --bad:#e08a76;
+  }
+  *{box-sizing:border-box}
+  [hidden]{display:none !important}
+  html,body{height:100%;margin:0;background:#000;color:var(--text);overflow:hidden;
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+    -webkit-tap-highlight-color:transparent;touch-action:manipulation}
+  button{font:inherit;color:var(--text);border:0;background:none;cursor:pointer}
+  #video,#overlay{position:fixed;inset:0;width:100%;height:100%}
+  #video{object-fit:cover;background:#000}
+  #overlay{pointer-events:none}
+  #debug{position:fixed;top:calc(env(safe-area-inset-top) + 8px);left:10px;
+    font:11px/1.5 ui-monospace,Menlo,monospace;color:#9fe0b0;background:rgba(0,0,0,.55);
+    padding:6px 8px;border-radius:6px;white-space:pre;z-index:5;pointer-events:none}
+
+  #hint{position:fixed;top:calc(env(safe-area-inset-top) + 14px);left:50%;
+    transform:translateX(-50%);z-index:4;max-width:calc(100vw - 28px);
+    display:flex;align-items:center;gap:8px;
+    padding:10px 18px;border-radius:999px;border:1px solid rgba(255,255,255,.16);
+    background:rgba(12,13,14,.78);backdrop-filter:blur(12px);
+    font-size:17px;font-weight:600;letter-spacing:.2px;white-space:nowrap;
+    box-shadow:0 6px 24px rgba(0,0,0,.35);transition:background .15s,border-color .15s}
+  #hint::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--accent);flex:0 0 auto}
+  #hint.ready{border-color:rgba(123,191,138,.65);color:#c9efd2}
+  #hint.ready::before{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+  #hint.warn{border-color:rgba(224,138,118,.6)}
+
+  .screen{position:fixed;inset:0;z-index:10;background:var(--bg);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    padding:32px 28px calc(32px + env(safe-area-inset-bottom));text-align:center}
+  .screen .brand{font-size:30px;font-weight:700;letter-spacing:2px;margin-bottom:10px}
+  .screen .brand span{color:var(--accent)}
+  .screen p{color:var(--muted);font-size:14px;line-height:1.7;margin:0 0 26px;max-width:320px}
+  .screen .privacy{font-size:11.5px;color:#6f757b;margin-top:26px;margin-bottom:0}
+  .primary{background:var(--accent);color:#1a1408;font-weight:700;font-size:16px;
+    height:50px;padding:0 34px;border-radius:12px;min-width:190px}
+  .primary:active{transform:scale(.98)}
+  .spin{width:26px;height:26px;border:2px solid rgba(255,255,255,.2);
+    border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite;margin-bottom:18px}
+  @keyframes spin{to{transform:rotate(360deg)}}
+
+  #topbar{position:fixed;top:calc(env(safe-area-inset-top) + 66px);left:50%;
+    transform:translateX(-50%);z-index:4}
+
+  #bottom{position:fixed;left:0;right:0;bottom:0;z-index:4;
+    padding:18px 16px calc(12px + env(safe-area-inset-bottom));
+    background:linear-gradient(to top,rgba(0,0,0,.82) 30%,rgba(0,0,0,0))}
+  .row{display:flex;align-items:center;gap:10px}
+  .modes{display:flex;gap:7px;background:rgba(12,13,14,.6);border:1px solid var(--line);
+    padding:4px;border-radius:999px;backdrop-filter:blur(8px)}
+  .mode{padding:7px 14px;border-radius:999px;font-size:13px;color:#c2c6ca}
+  .mode.on{background:var(--accent);color:#1a1408;font-weight:700}
+  .ghost{width:46px;height:46px;border-radius:50%;border:1px solid var(--line);
+    background:rgba(12,13,14,.6);backdrop-filter:blur(8px);font-size:12px;color:#c2c6ca}
+  #lockBtn{flex:1;height:52px;border-radius:12px;background:var(--accent);color:#1a1408;
+    font-weight:700;font-size:16px;transition:background .15s,color .15s}
+  #lockBtn.locked{background:rgba(12,13,14,.6);color:var(--text);border:1px solid var(--line);
+    font-weight:500;backdrop-filter:blur(8px)}
+  #shutter{flex:0 0 66px;width:66px;height:66px;border-radius:50%;border:4px solid #fff;
+    background:rgba(255,255,255,.08);position:relative;transition:transform .1s,border-color .2s}
+  #shutter::after{content:"";position:absolute;inset:7px;border-radius:50%;background:#fff;
+    transition:background .2s}
+  #shutter:active{transform:scale(.94)}
+  #shutter.ready{border-color:var(--ok)}
+  #shutter.ready::after{background:var(--ok)}
+
+  #capture{position:fixed;inset:0;z-index:12;background:#000;display:flex;
+    flex-direction:column;padding:calc(10px + env(safe-area-inset-top)) 12px calc(14px + env(safe-area-inset-bottom))}
+  #shot{flex:1;min-height:0;width:100%;object-fit:contain;border-radius:8px;background:#08090a}
+  .cap-actions{display:flex;gap:10px;padding-top:12px}
+  .cap-actions button{flex:1;height:48px;border-radius:12px;font-size:15px;font-weight:600}
+  #saveBtn{background:var(--accent);color:#1a1408}
+  #againBtn{background:var(--panel);border:1px solid var(--line);color:var(--text)}
+
+  #toast{position:fixed;left:50%;bottom:calc(116px + env(safe-area-inset-bottom));z-index:20;
+    transform:translateX(-50%);background:rgba(12,13,14,.9);border:1px solid var(--line);
+    padding:9px 16px;border-radius:999px;font-size:13px;white-space:nowrap;
+    opacity:0;pointer-events:none;transition:opacity .2s}
+  #toast.show{opacity:1}
+  #iosWarn{position:fixed;left:14px;right:14px;bottom:calc(112px + env(safe-area-inset-bottom));
+    z-index:6;background:rgba(30,20,16,.92);border:1px solid rgba(224,138,118,.5);
+    color:#f0c4b8;font-size:12.5px;line-height:1.55;border-radius:10px;padding:10px 12px}
+  #iosWarn button{float:right;color:#f0c4b8;font-size:16px;line-height:1;padding:0 2px}
+</style>
+</head>
+<body>
+<video id="video" playsinline muted autoplay></video>
+<canvas id="overlay"></canvas>
+
+<div id="debug" hidden></div>
+<div id="hint" hidden><span id="hintText"></span></div>
+<div id="topbar" hidden>
+  <div class="modes">
+    <button class="mode on" data-mode="auto">自动</button>
+    <button class="mode" data-mode="full">全身</button>
+    <button class="mode" data-mode="half">半身</button>
+  </div>
+</div>
+<div id="iosWarn" hidden>
+  <button id="iosWarnClose" aria-label="关闭">×</button>
+  画面没出来？iOS 主屏 App 偶尔会锁住相机，请用 Safari 标签页打开本页。
+</div>
+
+<div id="idle" class="screen">
+  <div class="brand">取景<span>助手</span></div>
+  <p>让 AI 看着画面，告诉你最佳取景框在哪；站进去，再按快门。</p>
+  <button id="startBtn" class="primary">开启相机</button>
+  <p class="privacy">画面只在本机处理，不上传。首次加载约 25 MB。</p>
+</div>
+
+<div id="loading" class="screen" hidden>
+  <div class="spin"></div>
+  <p style="margin:0">正在启动相机与取景模型…</p>
+</div>
+
+<div id="error" class="screen" hidden>
+  <div class="brand" style="font-size:22px">打不开</div>
+  <p id="errorMsg"></p>
+  <button id="retryBtn" class="primary">重试</button>
+</div>
+
+<div id="bottom" hidden>
+  <div class="row">
+    <button id="lockBtn">用这个框</button>
+    <button id="flipBtn" class="ghost" aria-label="切换前后摄像头">前后</button>
+    <button id="shutter" aria-label="拍照"></button>
+  </div>
+</div>
+
+<div id="capture" hidden>
+  <img id="shot" alt="刚拍的照片">
+  <div class="cap-actions">
+    <button id="againBtn">继续拍</button>
+    <button id="saveBtn">保存 / 分享</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

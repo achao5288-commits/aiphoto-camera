@@ -1,0 +1,16 @@
+{
+  "name": "取景助手",
+  "short_name": "取景",
+  "description": "实时显示最佳取景框，并提示人往哪站、手机往哪转。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#101112",
+  "theme_color": "#101112",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}
