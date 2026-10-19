@@ -247,7 +247,7 @@ function update(pts, now) {
   }
 
   const box = targetBox(mode, W, H);
-  const res = evaluate(metrics, box, mode, W, H);
+  const res = evaluate(metrics, box, mode, W, H, ready ? 1.2 : 1);
 
   if (res.key === 'ok') {
     if (!okSince) okSince = now;

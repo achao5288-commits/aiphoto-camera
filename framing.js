@@ -172,7 +172,8 @@ export function targetBox(mode, W, H) {
 }
 
 // Compare current body against the target box. One hint at a time.
-export function evaluate(m, box, mode, W, H) {
+// hyst > 1 widens tolerances so an already-green frame does not flicker.
+export function evaluate(m, box, mode, W, H, hyst = 1) {
   const out = (key, ok = false, errors = {}) => ({ ok, key, hint: HINTS[key], errors });
 
   if (!m || !m.ok) return out('no_person');
@@ -192,12 +193,12 @@ export function evaluate(m, box, mode, W, H) {
     x: m.centerX - box.cx,
   };
 
-  if (errors.height > t.tolH * H) return out('too_close', false, errors);
-  if (errors.height < -t.tolH * H) return out('too_far', false, errors);
-  if (errors.head > t.tolHead * H) return out('head_low', false, errors);
-  if (errors.head < -t.tolHead * H) return out('head_high', false, errors);
-  if (errors.x < -t.tolX * W) return out('pan_left', false, errors);
-  if (errors.x > t.tolX * W) return out('pan_right', false, errors);
+  if (errors.height > t.tolH * H * hyst) return out('too_close', false, errors);
+  if (errors.height < -t.tolH * H * hyst) return out('too_far', false, errors);
+  if (errors.head > t.tolHead * H * hyst) return out('head_low', false, errors);
+  if (errors.head < -t.tolHead * H * hyst) return out('head_high', false, errors);
+  if (errors.x < -t.tolX * W * hyst) return out('pan_left', false, errors);
+  if (errors.x > t.tolX * W * hyst) return out('pan_right', false, errors);
   return out('ok', true, errors);
 }
 

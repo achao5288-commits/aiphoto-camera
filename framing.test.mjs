@@ -129,6 +129,8 @@ for (const [variant, key] of Object.entries(cases)) {
   assert.equal(evaluate(m, box, 'full', W, H).key, 'ok');
   m.height = box.h + TARGETS.full.tolH * H + 1;
   assert.equal(evaluate(m, box, 'full', W, H).key, 'too_close');
+  // Hysteresis: an already-green frame survives a 20% overshoot.
+  assert.equal(evaluate(m, box, 'full', W, H, 1.2).key, 'ok');
 }
 
 console.log('framing: all assertions passed');
