@@ -1,5 +1,5 @@
 import { FilesetResolver, PoseLandmarker } from './vendor/vision_bundle.js';
-import { mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS } from './framing.js';
+import { mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS } from './framing.js?v=2';
 
 const $ = (s) => document.querySelector(s);
 const video = $('#video');
@@ -21,6 +21,11 @@ const capture = $('#capture');
 const shot = $('#shot');
 const toastEl = $('#toast');
 const iosWarn = $('#iosWarn');
+const prep = $('#prep');
+const prepText = $('#prepText');
+const prepSub = $('#prepSub');
+const loadText = $('#loadText');
+const loadSub = $('#loadSub');
 
 const qs = new URLSearchParams(location.search);
 const MOCK = qs.has('mock');
@@ -76,12 +81,23 @@ function showToast(text) {
   toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
 }
 
+function setLoad(text, sub = '') {
+  loadText.textContent = text;
+  loadSub.textContent = sub;
+}
+
+function setPrep(text, sub = '') {
+  prepText.textContent = text;
+  prepSub.textContent = sub;
+}
+
 function showError(msg) {
   state = 'error';
   idle.hidden = true;
   loading.hidden = true;
   bottom.hidden = true;
   topbar.hidden = true;
+  prep.hidden = true;
   errorMsg.textContent = msg;
   errorScreen.hidden = false;
   if (rafId) cancelAnimationFrame(rafId);
@@ -120,9 +136,100 @@ async function openCamera(f) {
   await video.play().catch(() => {});
 }
 
-async function createLandmarker() {
+function withTimeout(p, ms, msg) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(msg)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); },
+    );
+  });
+}
+
+function wasmSimd() {
+  try {
+    return WebAssembly.validate(new Uint8Array([
+      0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0,
+      10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11,
+    ]));
+  } catch {
+    return false;
+  }
+}
+
+// Download with visible progress. Returns the buffer only when keep=true.
+async function fetchWithProgress(url, onChunk, keep) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 300000);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const total = Number(res.headers.get('content-length')) || 0;
+    if (!res.body?.getReader) {
+      const buf = await res.arrayBuffer();
+      onChunk(buf.byteLength, total || buf.byteLength);
+      return keep ? buf : null;
+    }
+    const reader = res.body.getReader();
+    const chunks = keep ? [] : null;
+    let got = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      got += value.byteLength;
+      if (chunks) chunks.push(value);
+      onChunk(got, total);
+    }
+    if (!keep) return null;
+    const out = new Uint8Array(got);
+    let off = 0;
+    for (const c of chunks) {
+      out.set(c, off);
+      off += c.byteLength;
+    }
+    return out.buffer;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function createLandmarker(onProgress) {
   const wasm = new URL('./vendor/wasm', import.meta.url).href;
-  const model = new URL('./models/pose_landmarker_lite.task', import.meta.url).href;
+  const modelUrl = new URL('./models/pose_landmarker_lite.task', import.meta.url).href;
+  const simd = wasmSimd();
+  const wasmUrl = new URL(
+    `./vendor/wasm/vision_wasm_${simd ? '' : 'nosimd_'}internal.wasm`,
+    import.meta.url,
+  ).href;
+
+  // Prefetch both 15 MB assets so the user sees real progress; the wasm
+  // response lands in the HTTP cache and MediaPipe reuses it.
+  const prog = {
+    model: 0, wasm: 0,
+    modelTotal: 5777746,
+    wasmTotal: simd ? 9423986 : 9294247,
+  };
+  const report = () => onProgress?.(prog.model + prog.wasm, prog.modelTotal + prog.wasmTotal);
+  let modelBuf = null;
+  try {
+    [modelBuf] = await Promise.all([
+      fetchWithProgress(modelUrl, (n, t) => {
+        prog.model = n;
+        if (t) prog.modelTotal = t;
+        report();
+      }, true),
+      fetchWithProgress(wasmUrl, (n, t) => {
+        prog.wasm = n;
+        if (t) prog.wasmTotal = t;
+        report();
+      }, false),
+    ]);
+  } catch (e) {
+    console.warn('asset prefetch failed, using MediaPipe loader', e);
+    prog.model = 0;
+    prog.wasm = 0;
+  }
+
   const fileset = await FilesetResolver.forVisionTasks(wasm);
   const base = {
     runningMode: 'VIDEO',
@@ -133,13 +240,30 @@ async function createLandmarker() {
   };
   const opts = (delegate) => ({
     ...base,
-    baseOptions: { modelAssetPath: model, delegate },
+    baseOptions: {
+      ...(modelBuf ? { modelAssetBuffer: new Uint8Array(modelBuf) } : { modelAssetPath: modelUrl }),
+      delegate,
+    },
   });
-  try {
-    return await PoseLandmarker.createFromOptions(fileset, opts('GPU'));
-  } catch {
-    return await PoseLandmarker.createFromOptions(fileset, opts('CPU'));
+  // iOS Safari can hang on the WebGL delegate; CPU is plenty for a 20 fps hint loop.
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent)
+    || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const delegates = isIOS ? ['CPU'] : ['GPU', 'CPU'];
+
+  let lastErr;
+  for (const d of delegates) {
+    try {
+      return await withTimeout(
+        PoseLandmarker.createFromOptions(fileset, opts(d)),
+        d === 'GPU' ? 25000 : 60000,
+        `取景模型初始化超时（${d}）`,
+      );
+    } catch (e) {
+      lastErr = e;
+      console.warn('landmarker delegate failed:', d, e);
+    }
   }
+  throw lastErr;
 }
 
 async function start() {
@@ -157,6 +281,7 @@ async function start() {
 
   loading.hidden = false;
   state = 'loading';
+  setLoad('正在打开相机…');
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error(location.protocol === 'file:'
@@ -170,16 +295,25 @@ async function start() {
     return;
   }
 
+  // Camera is live: show the preview while the two 15 MB assets stream in.
+  loading.hidden = true;
+  prep.hidden = false;
+  setPrep('相机已就绪，正在加载取景模型…', '首次约 15 MB');
   try {
-    landmarker = await createLandmarker();
+    landmarker = await createLandmarker((done, total) => {
+      const mb = (n) => (n / 1048576).toFixed(1);
+      if (done >= total) setPrep('正在初始化取景模型…', '首次加载完成后会快很多');
+      else setPrep('正在下载取景模型…', `${mb(done)} / ${mb(total)} MB`);
+    });
   } catch (e) {
-    loading.hidden = true;
+    prep.hidden = true;
+    landmarker = null;
     showError('取景模型加载失败：' + (e?.message || e));
     return;
   }
 
   await video.play().catch(() => {});
-  loading.hidden = true;
+  prep.hidden = true;
   bottom.hidden = false;
   topbar.hidden = false;
   if (DEBUG) debugEl.hidden = false;
