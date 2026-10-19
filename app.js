@@ -1,5 +1,5 @@
 import { FilesetResolver, PoseLandmarker } from './vendor/vision_bundle.js';
-import { mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS } from './framing.js?v=2';
+import { mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS } from './framing.js?v=3';
 
 const $ = (s) => document.querySelector(s);
 const video = $('#video');
@@ -157,80 +157,159 @@ function wasmSimd() {
   }
 }
 
-// Download with visible progress. Returns the buffer only when keep=true.
-async function fetchWithProgress(url, onChunk, keep) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 300000);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const total = Number(res.headers.get('content-length')) || 0;
-    if (!res.body?.getReader) {
+// Download in 1 MiB ranges with per-chunk retries. GitHub Pages edges in
+// mainland China reset long transfers; short ranges survive and resume.
+async function fetchRange(url, start, end, retries = 3) {
+  let delay = 400;
+  for (let attempt = 0; ; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60000);
+    try {
+      const res = await fetch(url, {
+        headers: { Range: `bytes=${start}-${end}` },
+        cache: 'no-store',
+        signal: ctrl.signal,
+      });
+      if (res.status === 200 || res.status === 404 || res.status === 416) {
+        ctrl.abort();
+        const err = new Error(`HTTP ${res.status}`);
+        err.noRetry = true;
+        throw err;
+      }
+      if (res.status !== 206) throw new Error(`HTTP ${res.status}`);
       const buf = await res.arrayBuffer();
-      onChunk(buf.byteLength, total || buf.byteLength);
-      return keep ? buf : null;
+      const want = end - start + 1;
+      if (buf.byteLength !== want) throw new Error(`short read ${buf.byteLength}/${want}`);
+      return new Uint8Array(buf);
+    } catch (e) {
+      if (e.noRetry || attempt >= retries) throw e;
+      await new Promise((r) => setTimeout(r, delay));
+      delay *= 2;
+    } finally {
+      clearTimeout(timer);
     }
-    const reader = res.body.getReader();
-    const chunks = keep ? [] : null;
-    let got = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      got += value.byteLength;
-      if (chunks) chunks.push(value);
-      onChunk(got, total);
-    }
-    if (!keep) return null;
-    const out = new Uint8Array(got);
-    let off = 0;
-    for (const c of chunks) {
-      out.set(c, off);
-      off += c.byteLength;
-    }
-    return out.buffer;
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+async function downloadChunked(url, size, onProgress) {
+  const CHUNK = 1 << 20;
+  const CONC = 4;
+  const out = new Uint8Array(size);
+  const ranges = [];
+  for (let s = 0; s < size; s += CHUNK) {
+    ranges.push([s, Math.min(s + CHUNK - 1, size - 1)]);
+  }
+  let next = 0;
+  let done = 0;
+  const worker = async () => {
+    while (next < ranges.length) {
+      const [s, e] = ranges[next++];
+      const bytes = await fetchRange(url, s, e);
+      out.set(bytes, s);
+      done += bytes.byteLength;
+      onProgress?.(done, size);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(CONC, ranges.length) }, worker));
+  return out;
+}
+
+async function readBody(res, onProgress) {
+  const total = Number(res.headers.get('content-length')) || 0;
+  if (!res.body?.getReader) {
+    const buf = await res.arrayBuffer();
+    onProgress?.(buf.byteLength, buf.byteLength);
+    return new Uint8Array(buf);
+  }
+  const reader = res.body.getReader();
+  const out = total ? new Uint8Array(total) : null;
+  const chunks = out ? null : [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (out) out.set(value, got);
+    else chunks.push(value);
+    got += value.byteLength;
+    onProgress?.(got, total || got);
+  }
+  if (out) return out.subarray(0, got);
+  const joined = new Uint8Array(got);
+  let off = 0;
+  for (const c of chunks) {
+    joined.set(c, off);
+    off += c.byteLength;
+  }
+  return joined;
+}
+
+// One-byte Range probe: chunked when supported (resumable on flaky mobile
+// networks), otherwise read the full response the probe already opened.
+async function downloadAsset(url, size, onProgress) {
+  const probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+  if (probe.status === 206) {
+    await probe.arrayBuffer();
+    return downloadChunked(url, size, onProgress);
+  }
+  if (probe.status === 200) return readBody(probe, onProgress);
+  throw new Error(`HTTP ${probe.status}`);
+}
+
+async function downloadAny(urls, size, onProgress) {
+  let last;
+  for (const url of urls) {
+    try {
+      return await downloadAsset(url, size, onProgress);
+    } catch (e) {
+      last = e;
+      console.warn('download failed:', url, e);
+    }
+  }
+  throw last;
 }
 
 async function createLandmarker(onProgress) {
   const wasm = new URL('./vendor/wasm', import.meta.url).href;
   const modelUrl = new URL('./models/pose_landmarker_lite.task', import.meta.url).href;
   const simd = wasmSimd();
-  const wasmUrl = new URL(
-    `./vendor/wasm/vision_wasm_${simd ? '' : 'nosimd_'}internal.wasm`,
-    import.meta.url,
-  ).href;
+  const wasmName = `vision_wasm_${simd ? '' : 'nosimd_'}internal.wasm`;
+  const wasmUrl = new URL(`./vendor/wasm/${wasmName}`, import.meta.url).href;
+  const modelMirror = 'https://cdn.jsdelivr.net/gh/achao5288-commits/aiphoto-camera@main/models/pose_landmarker_lite.task';
+  const wasmMirror = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm/${wasmName}`;
 
-  // Prefetch both 15 MB assets so the user sees real progress; the wasm
-  // response lands in the HTTP cache and MediaPipe reuses it.
   const prog = {
     model: 0, wasm: 0,
     modelTotal: 5777746,
     wasmTotal: simd ? 9423986 : 9294247,
   };
   const report = () => onProgress?.(prog.model + prog.wasm, prog.modelTotal + prog.wasmTotal);
+
   let modelBuf = null;
-  try {
-    [modelBuf] = await Promise.all([
-      fetchWithProgress(modelUrl, (n, t) => {
-        prog.model = n;
-        if (t) prog.modelTotal = t;
-        report();
-      }, true),
-      fetchWithProgress(wasmUrl, (n, t) => {
-        prog.wasm = n;
-        if (t) prog.wasmTotal = t;
-        report();
-      }, false),
-    ]);
-  } catch (e) {
-    console.warn('asset prefetch failed, using MediaPipe loader', e);
-    prog.model = 0;
-    prog.wasm = 0;
+  let wasmBlobUrl = null;
+  const [mb, wb] = await Promise.allSettled([
+    downloadAny([modelUrl, modelMirror], prog.modelTotal, (n, t) => {
+      prog.model = Math.max(prog.model, n);
+      prog.modelTotal = t;
+      report();
+    }),
+    downloadAny([wasmUrl, wasmMirror], prog.wasmTotal, (n, t) => {
+      prog.wasm = Math.max(prog.wasm, n);
+      prog.wasmTotal = t;
+      report();
+    }),
+  ]);
+  if (mb.status === 'fulfilled') modelBuf = mb.value;
+  else console.warn('model prefetch failed', mb.reason);
+  if (wb.status === 'fulfilled') {
+    wasmBlobUrl = URL.createObjectURL(new Blob([wb.value], { type: 'application/wasm' }));
+  } else {
+    console.warn('wasm prefetch failed', wb.reason);
   }
+  // Prefetch is done (or skipped); MediaPipe now compiles from memory/cache.
+  onProgress?.(prog.modelTotal + prog.wasmTotal, prog.modelTotal + prog.wasmTotal);
 
   const fileset = await FilesetResolver.forVisionTasks(wasm);
+  fileset.wasmBinaryPath = wasmBlobUrl || wasmMirror;
   const base = {
     runningMode: 'VIDEO',
     numPoses: 1,
@@ -241,7 +320,7 @@ async function createLandmarker(onProgress) {
   const opts = (delegate) => ({
     ...base,
     baseOptions: {
-      ...(modelBuf ? { modelAssetBuffer: new Uint8Array(modelBuf) } : { modelAssetPath: modelUrl }),
+      ...(modelBuf ? { modelAssetBuffer: modelBuf } : { modelAssetPath: modelMirror }),
       delegate,
     },
   });
@@ -308,7 +387,8 @@ async function start() {
   } catch (e) {
     prep.hidden = true;
     landmarker = null;
-    showError('取景模型加载失败：' + (e?.message || e));
+    showError('取景模型加载失败：' + (e?.message || e)
+      + '。首次需要下载约 15 MB，请检查网络后重试，或换 Wi-Fi。');
     return;
   }
 
