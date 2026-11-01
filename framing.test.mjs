@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
-  mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS, TARGETS,
-  announceAllowed,
+  mapLandmarks, measure, targetBox, followBox, evaluate, mockLandmarks, HINTS, TARGETS,
+  announceAllowed, levelHint, LEVEL_TOL,
 } from './framing.js';
 
 const W = 390;
@@ -132,6 +132,30 @@ for (const [variant, key] of Object.entries(cases)) {
   assert.equal(evaluate(m, box, 'full', W, H).key, 'too_close');
   // Hysteresis: an already-green frame survives a 20% overshoot.
   assert.equal(evaluate(m, box, 'full', W, H, 1.2).key, 'ok');
+}
+
+// --- box follows the subject ---
+{
+  const b = followBox('full', W, H, 10);
+  assert.equal(b.w, targetBox('full', W, H).w);
+  assert.equal(b.y, targetBox('full', W, H).y);
+  assert.ok(near(b.cx, b.w / 2 + 4), `clamped left ${b.cx}`);
+  const c = followBox('full', W, H, 0.4 * W);
+  assert.ok(near(c.cx, 0.4 * W), `follows ${c.cx}`);
+  const d = followBox('full', W, H, W - 5);
+  assert.ok(near(d.cx, W - 4 - d.w / 2), `clamped right ${d.cx}`);
+  assert.ok(d.x + d.w <= W - 4 + 1e-9);
+  // No subject yet: the fixed composition box.
+  assert.ok(near(followBox('full', W, H, null).cx, 0.66 * W));
+}
+
+// --- landscape level ---
+{
+  assert.equal(levelHint(null), 'no_sensor');
+  assert.equal(levelHint(0), 'ok');
+  assert.equal(levelHint(LEVEL_TOL - 0.1), 'ok');
+  assert.equal(levelHint(-LEVEL_TOL - 0.1), 'level_right'); // right side down
+  assert.equal(levelHint(LEVEL_TOL + 0.1), 'level_left');
 }
 
 // --- voice/haptic cooldown ---

@@ -1,7 +1,8 @@
 import { FilesetResolver, PoseLandmarker } from './vendor/vision_bundle.js';
 import {
-  mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS, announceAllowed,
-} from './framing.js?v=4';
+  mapLandmarks, measure, targetBox, followBox, evaluate, mockLandmarks, HINTS,
+  announceAllowed, levelHint, LEVEL_TOL,
+} from './framing.js?v=5';
 
 const $ = (s) => document.querySelector(s);
 const video = $('#video');
@@ -48,6 +49,11 @@ let lastDetect = 0;
 let lastTs = 0;
 let rafId = 0;
 let metrics = null;
+
+let scene = 'portrait';
+let roll = null;
+let motionOn = false;
+let lockedCx = null;
 
 let mode = 'full';
 let manualMode = null;
@@ -539,7 +545,9 @@ function loop(now) {
   if (document.hidden) return;
 
   let pts = null;
-  if (MOCK) {
+  if (scene === 'landscape') {
+    // Nothing to detect: a landscape frame is judged by the phone's level.
+  } else if (MOCK) {
     pts = mapLandmarks(mockLandmarks(VARIANT, W / H), { videoW: W, videoH: H, W, H });
   } else if (landmarker && video.readyState >= 2 && video.videoWidth > 0) {
     if (now - lastDetect >= 50) {
@@ -568,6 +576,13 @@ function loop(now) {
 }
 
 function update(pts, now) {
+  if (scene === 'landscape') {
+    lastPoints = null;
+    metrics = null;
+    commitHint(levelHint(roll), now);
+    return;
+  }
+
   lastPoints = pts;
   metrics = pts ? measure(pts) : null;
 
@@ -587,9 +602,13 @@ function update(pts, now) {
   }
 
   const box = targetBox(mode, W, H);
-  const res = evaluate(metrics, box, mode, W, H, ready ? 1.2 : 1);
+  commitHint(evaluate(metrics, box, mode, W, H, ready ? 1.2 : 1).key, now);
+}
 
-  if (res.key === 'ok') {
+// Hold a good state briefly so a green frame does not flicker, and debounce
+// every other hint the same way.
+function commitHint(key, now) {
+  if (key === 'ok') {
     if (!okSince) okSince = now;
     if (now - okSince >= 600) {
       ready = true;
@@ -601,11 +620,11 @@ function update(pts, now) {
   } else {
     okSince = 0;
     ready = false;
-    if (res.key !== pendingKey) {
-      pendingKey = res.key;
+    if (key !== pendingKey) {
+      pendingKey = key;
       pendingSince = now;
     }
-    if (now - pendingSince >= 400) setHint(res.key);
+    if (now - pendingSince >= 400) setHint(key);
   }
   shutter.classList.toggle('ready', ready);
 }
@@ -705,7 +724,12 @@ function draw() {
   ctx.clearRect(0, 0, W, H);
   if (state !== 'tracking') return;
 
-  const box = targetBox(mode, W, H);
+  if (scene === 'landscape') {
+    drawLevel();
+    return;
+  }
+
+  const box = followBox(mode, W, H, locked ? lockedCx : metrics?.centerX);
   if (locked) {
     ctx.fillStyle = 'rgba(0,0,0,.46)';
     ctx.fillRect(0, 0, W, box.y);
@@ -758,6 +782,48 @@ function drawBox(b) {
   ctx.restore();
 }
 
+// Landscape: nobody to track, so show thirds plus a gravity-driven level.
+function drawLevel() {
+  const ok = roll != null && Math.abs(roll) <= LEVEL_TOL;
+  const color = roll == null ? 'rgba(255,255,255,.4)' : ok ? '#7bbf8a' : '#e9b45b';
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,.16)';
+  ctx.lineWidth = 1;
+  for (const f of [1 / 3, 2 / 3]) {
+    ctx.beginPath(); ctx.moveTo(W * f, 0); ctx.lineTo(W * f, H); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, H * f); ctx.lineTo(W, H * f); ctx.stroke();
+  }
+
+  const cy = H * 0.5;
+  const half = Math.min(W * 0.36, 160);
+  ctx.strokeStyle = color;
+  ctx.lineWidth = ok ? 3 : 2;
+  ctx.lineCap = 'round';
+  if (roll == null) ctx.setLineDash([7, 7]);
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - half, cy);
+  ctx.lineTo(W / 2 + half, cy);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(W / 2, cy - 14);
+  ctx.lineTo(W / 2, cy + 14);
+  ctx.stroke();
+
+  const text = roll == null ? '无姿态数据'
+    : ok ? '水平' : `${roll < 0 ? '右低' : '左低'} ${Math.abs(roll).toFixed(1)}°`;
+  ctx.font = '600 13px "PingFang SC","Microsoft YaHei",system-ui,sans-serif';
+  ctx.textBaseline = 'middle';
+  const tw = ctx.measureText(text).width;
+  ctx.fillStyle = 'rgba(12,13,14,.78)';
+  roundRect(ctx, W / 2 - tw / 2 - 8, cy + 18, tw + 16, 24, 7);
+  ctx.fill();
+  ctx.fillStyle = color;
+  ctx.fillText(text, W / 2 - tw / 2, cy + 30);
+  ctx.restore();
+}
+
 function drawSkeleton(points) {
   const conns = PoseLandmarker.POSE_CONNECTIONS || [];
   ctx.save();
@@ -788,9 +854,40 @@ function updateDebug() {
   const vh = MOCK ? H : video.videoHeight;
   debugEl.textContent =
     `video ${vw}x${vh}  screen ${W}x${H}\n`
+    + `scene ${scene}  roll ${roll == null ? '-' : roll.toFixed(1)}°\n`
     + `mode ${mode}${manualMode ? '(manual)' : ''}  locked ${locked}  ready ${ready}\n`
     + `head ${m.headTop?.toFixed(0) ?? '-'}  height ${m.height?.toFixed(0) ?? '-'}  cx ${m.centerX?.toFixed(0) ?? '-'}\n`
     + `feet ${m.feetVisible ? 'Y' : 'N'}  hip ${m.hipsVisible ? 'Y' : 'N'}  knee ${m.kneesVisible ? 'Y' : 'N'}`;
+}
+
+// --- 场景：人像看关键点，风景看重力水平仪 ---
+function onMotion(e) {
+  const g = e.accelerationIncludingGravity;
+  if (!g || g.x == null) return;
+  const x = g.x || 0;
+  const y = g.y || 0;
+  // Phone lying flat: gravity leaves the screen plane and roll means nothing.
+  roll = Math.abs(y) < 3 ? null : Math.atan2(-x, -y) * 180 / Math.PI;
+}
+
+async function enableMotion() {
+  if (motionOn) return;
+  const DME = window.DeviceMotionEvent;
+  try {
+    if (DME && typeof DME.requestPermission === 'function') {
+      if (await DME.requestPermission() !== 'granted') return;
+    }
+    window.addEventListener('devicemotion', onMotion);
+    motionOn = true;
+  } catch {}
+}
+
+const sceneBtns = document.querySelectorAll('[data-scene]');
+const portraitModes = $('#portraitModes');
+
+function updateSceneChips() {
+  sceneBtns.forEach((b) => b.classList.toggle('on', b.dataset.scene === scene));
+  portraitModes.hidden = scene !== 'portrait';
 }
 
 function updateModeChips() {
@@ -883,9 +980,29 @@ $('#againBtn').addEventListener('click', closeCapture);
 lockBtn.addEventListener('click', () => {
   if (state !== 'tracking') return;
   locked = !locked;
+  lockedCx = locked ? (metrics?.centerX ?? null) : null;
   lockBtn.classList.toggle('locked', locked);
   lockBtn.textContent = locked ? '重选框' : '用这个框';
   resetHint();
+});
+
+sceneBtns.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.scene === scene) return;
+    scene = btn.dataset.scene;
+    locked = false;
+    lockedCx = null;
+    lockBtn.classList.remove('locked');
+    lockBtn.textContent = '用这个框';
+    lastPose = null;
+    lastPoints = null;
+    metrics = null;
+    roll = null;
+    lockBtn.hidden = scene === 'landscape';
+    resetHint();
+    updateSceneChips();
+    if (scene === 'landscape') enableMotion();
+  });
 });
 
 document.querySelectorAll('[data-mode]').forEach((btn) => {
@@ -895,6 +1012,7 @@ document.querySelectorAll('[data-mode]').forEach((btn) => {
     if (v !== 'auto') mode = v;
     else detectedMode = null;
     locked = false;
+    lockedCx = null;
     lockBtn.classList.remove('locked');
     lockBtn.textContent = '用这个框';
     resetHint();
@@ -946,4 +1064,5 @@ window.addEventListener('pageshow', (e) => {
 
 resize();
 setVoice(voiceOn);
+updateSceneChips();
 if (MOCK) start();

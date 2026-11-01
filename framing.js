@@ -34,7 +34,22 @@ export const HINTS = {
   pan_right: '手机往右转一点',
   hold: '保持住…',
   ok: '可以拍了 · 保持住',
+  level_left: '手机左边抬一点',
+  level_right: '手机右边抬一点',
+  no_sensor: '读不到手机姿态，参考三分线',
 };
+
+// Level tolerance in degrees before a landscape hint fires.
+export const LEVEL_TOL = 1.5;
+
+// roll is the device's sideways tilt in degrees from gravity: positive means
+// the left side is down, negative the right side.
+export function levelHint(roll) {
+  if (roll == null) return 'no_sensor';
+  if (roll < -LEVEL_TOL) return 'level_right';
+  if (roll > LEVEL_TOL) return 'level_left';
+  return 'ok';
+}
 
 // MediaPipe normalized landmarks -> screen CSS px, matching object-fit: cover.
 export function mapLandmarks(landmarks, { videoW, videoH, W, H }, mirrored = false) {
@@ -179,6 +194,15 @@ export function announceAllowed(key, now, lastAt, lastAny) {
   if (now - lastAny < 1600) return false;
   const t = lastAt[key];
   return t == null || now - t >= 5000;
+}
+
+// The drawn box follows the subject so nobody has to walk into a fixed frame;
+// evaluation still measures against the fixed composition target in targetBox.
+export function followBox(mode, W, H, centerX) {
+  const b = targetBox(mode, W, H);
+  if (centerX == null) return b;
+  const x = Math.min(Math.max(centerX - b.w / 2, 4), Math.max(4, W - b.w - 4));
+  return { ...b, x, cx: x + b.w / 2 };
 }
 
 // Compare current body against the target box. One hint at a time.
