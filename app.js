@@ -25,6 +25,7 @@ const shot = $('#shot');
 const toastEl = $('#toast');
 const iosWarn = $('#iosWarn');
 const prep = $('#prep');
+const prepRetry = $('#prepRetry');
 const prepText = $('#prepText');
 const prepSub = $('#prepSub');
 const loadText = $('#loadText');
@@ -94,6 +95,17 @@ function setPrep(text, sub = '') {
   prepSub.textContent = sub;
 }
 
+// Offer an escape hatch once loading looks stuck, rather than leaving the user
+// staring at a frozen progress line.
+let prepTimer = 0;
+function watchPrep() {
+  clearTimeout(prepTimer);
+  prepRetry.hidden = true;
+  prepTimer = setTimeout(() => {
+    if (state === 'loading') prepRetry.hidden = false;
+  }, 45000);
+}
+
 function showError(msg) {
   state = 'error';
   idle.hidden = true;
@@ -160,17 +172,20 @@ function wasmSimd() {
   }
 }
 
+// A silent connection is worse than a slow one: give up on a range quickly so
+// the retry/mirror path can take over instead of hanging the loading screen.
+const STALL_MS = 20000;
+
 // Download in 1 MiB ranges with per-chunk retries. GitHub Pages edges in
 // mainland China reset long transfers; short ranges survive and resume.
-async function fetchRange(url, start, end, retries = 3) {
+async function fetchRange(url, start, end, retries = 2) {
   let delay = 400;
   for (let attempt = 0; ; attempt++) {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 60000);
+    const timer = setTimeout(() => ctrl.abort(), STALL_MS);
     try {
       const res = await fetch(url, {
         headers: { Range: `bytes=${start}-${end}` },
-        cache: 'no-store',
         signal: ctrl.signal,
       });
       if (res.status === 200 || res.status === 404 || res.status === 416) {
@@ -229,7 +244,22 @@ async function readBody(res, onProgress) {
   const chunks = out ? null : [];
   let got = 0;
   for (;;) {
-    const { done, value } = await reader.read();
+    let idle = 0;
+    let step;
+    try {
+      step = await Promise.race([
+        reader.read(),
+        new Promise((_, reject) => {
+          idle = setTimeout(() => reject(new Error('下载卡住')), STALL_MS);
+        }),
+      ]);
+    } catch (e) {
+      reader.cancel().catch(() => {});
+      throw e;
+    } finally {
+      clearTimeout(idle);
+    }
+    const { done, value } = step;
     if (done) break;
     if (out) out.set(value, got);
     else chunks.push(value);
@@ -249,7 +279,14 @@ async function readBody(res, onProgress) {
 // One-byte Range probe: chunked when supported (resumable on flaky mobile
 // networks), otherwise read the full response the probe already opened.
 async function downloadAsset(url, size, onProgress) {
-  const probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, cache: 'no-store' });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), STALL_MS);
+  let probe;
+  try {
+    probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
   if (probe.status === 206) {
     await probe.arrayBuffer();
     return downloadChunked(url, size, onProgress);
@@ -310,6 +347,9 @@ async function createLandmarker(onProgress) {
   }
   // Prefetch is done (or skipped); MediaPipe now compiles from memory/cache.
   onProgress?.(prog.modelTotal + prog.wasmTotal, prog.modelTotal + prog.wasmTotal);
+  if (!modelBuf || !wasmBlobUrl) {
+    setPrep('下载不完整，正在换备用线路…', '最多再等 60 秒，也可以直接重试');
+  }
 
   const fileset = await FilesetResolver.forVisionTasks(wasm);
   fileset.wasmBinaryPath = wasmBlobUrl || wasmMirror;
@@ -365,6 +405,7 @@ async function start() {
   loading.hidden = false;
   state = 'loading';
   setLoad('正在打开相机…');
+  watchPrep();
   try {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error(location.protocol === 'file:'
@@ -753,6 +794,7 @@ $('#retryBtn').addEventListener('click', () => {
   start();
 });
 $('#iosWarnClose').addEventListener('click', () => { iosWarn.hidden = true; });
+prepRetry.addEventListener('click', () => location.reload());
 shutter.addEventListener('click', takeShot);
 $('#saveBtn').addEventListener('click', saveShot);
 $('#againBtn').addEventListener('click', closeCapture);
