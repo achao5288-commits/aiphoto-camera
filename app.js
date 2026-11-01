@@ -200,6 +200,13 @@ async function fetchRange(url, start, end, retries = 2) {
       if (buf.byteLength !== want) throw new Error(`short read ${buf.byteLength}/${want}`);
       return new Uint8Array(buf);
     } catch (e) {
+      // A dead connection will not come back in 400 ms; hand the asset to the
+      // next mirror host instead of burning three timeouts on this one.
+      if (ctrl.signal.aborted) {
+        const t = new Error('连接超时');
+        t.noRetry = true;
+        throw t;
+      }
       if (e.noRetry || attempt >= retries) throw e;
       await new Promise((r) => setTimeout(r, delay));
       delay *= 2;
@@ -279,8 +286,9 @@ async function readBody(res, onProgress) {
 // One-byte Range probe: chunked when supported (resumable on flaky mobile
 // networks), otherwise read the full response the probe already opened.
 async function downloadAsset(url, size, onProgress) {
+  // The probe is one byte: if that cannot land in 8 s, the host is not for us.
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), STALL_MS);
+  const timer = setTimeout(() => ctrl.abort(), 8000);
   let probe;
   try {
     probe = await fetch(url, { headers: { Range: 'bytes=0-0' }, signal: ctrl.signal });
@@ -343,8 +351,13 @@ async function createLandmarker(onProgress) {
   const simd = wasmSimd();
   const wasmName = `vision_wasm_${simd ? '' : 'nosimd_'}internal.wasm`;
   const wasmUrl = new URL(`./vendor/wasm/${wasmName}`, import.meta.url).href;
-  const modelMirror = 'https://cdn.jsdelivr.net/gh/achao5288-commits/aiphoto-camera@main/models/pose_landmarker_lite.task';
-  const wasmMirror = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm/${wasmName}`;
+  // GitHub Pages first, then the three jsDelivr edges: on mainland cellular the
+  // first host is the one that stalls.
+  const CDN = ['https://cdn.jsdelivr.net', 'https://fastly.jsdelivr.net', 'https://gcore.jsdelivr.net'];
+  const modelMirrors = CDN.map((h) => `${h}/gh/achao5288-commits/aiphoto-camera@main/models/pose_landmarker_lite.task`);
+  const wasmMirrors = CDN.map((h) => `${h}/npm/@mediapipe/tasks-vision@0.10.14/wasm/${wasmName}`);
+  const modelMirror = modelMirrors[0];
+  const wasmMirror = wasmMirrors[0];
 
   const prog = {
     model: 0, wasm: 0,
@@ -360,12 +373,12 @@ async function createLandmarker(onProgress) {
   const fromCache = !!(modelBuf && wasmBuf);
 
   const [mb, wb] = await Promise.allSettled([
-    modelBuf ? Promise.resolve(modelBuf) : downloadAny([modelUrl, modelMirror], prog.modelTotal, (n, t) => {
+    modelBuf ? Promise.resolve(modelBuf) : downloadAny([modelUrl, ...modelMirrors], prog.modelTotal, (n, t) => {
       prog.model = Math.max(prog.model, n);
       prog.modelTotal = t;
       report();
     }),
-    wasmBuf ? Promise.resolve(wasmBuf) : downloadAny([wasmUrl, wasmMirror], prog.wasmTotal, (n, t) => {
+    wasmBuf ? Promise.resolve(wasmBuf) : downloadAny([wasmUrl, ...wasmMirrors], prog.wasmTotal, (n, t) => {
       prog.wasm = Math.max(prog.wasm, n);
       prog.wasmTotal = t;
       report();
@@ -478,7 +491,9 @@ async function start() {
       setPrep('网络卡住了，正在重试…', `已下载 ${lastMb.toFixed(1)} MB`
         + (net.retries ? ` · 重试 ${net.retries} 次` : ''));
     } else {
-      setPrep('还没收到数据，正在重试…', net.err ? `网络错误：${net.err}` : '连接不动了');
+      setPrep('正在换线路…', net.err
+        ? `${net.err} · 已试 ${net.retries} 条线路`
+        : '连接不动了');
     }
   }, 2000);
   try {
