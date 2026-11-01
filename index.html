@@ -76,6 +76,7 @@
   .mode.on{background:var(--accent);color:#1a1408;font-weight:700}
   .ghost{width:46px;height:46px;border-radius:50%;border:1px solid var(--line);
     background:rgba(12,13,14,.6);backdrop-filter:blur(8px);font-size:12px;color:#c2c6ca}
+  .ghost.on{border-color:rgba(233,180,91,.65);color:var(--accent)}
   #lockBtn{flex:1;height:52px;border-radius:12px;background:var(--accent);color:#1a1408;
     font-weight:700;font-size:16px;transition:background .15s,color .15s}
   #lockBtn.locked{background:rgba(12,13,14,.6);color:var(--text);border:1px solid var(--line);
@@ -133,7 +134,7 @@
   <div class="brand">取景<span>助手</span></div>
   <p>让 AI 看着画面，告诉你最佳取景框在哪；站进去，再按快门。</p>
   <button id="startBtn" class="primary">开启相机</button>
-  <p class="privacy">画面只在本机处理，不上传。首次加载约 25 MB。</p>
+  <p class="privacy">画面只在本机处理，不上传。首次加载约 15 MB。</p>
 </div>
 
 <div id="loading" class="screen" hidden>
@@ -152,6 +153,7 @@
   <div class="row">
     <button id="lockBtn">用这个框</button>
     <button id="flipBtn" class="ghost" aria-label="切换前后摄像头">前后</button>
+    <button id="voiceBtn" class="ghost on" aria-pressed="true" aria-label="语音提示">语音</button>
     <button id="shutter" aria-label="拍照"></button>
   </div>
 </div>
@@ -166,6 +168,6 @@
 
 <div id="toast"></div>
 
-<script type="module" src="./app.js?v=3"></script>
+<script type="module" src="./app.js?v=4"></script>
 </body>
 </html>

@@ -18,6 +18,7 @@ python -m http.server 8000
 - **用这个框**：锁定当前框，框外压暗；再点一次“重选框”。
 - 框变绿并显示“可以拍了 · 保持住”时按快门。
 - **前后**：切换前后摄像头（前置画面与关键点同时镜像）。
+- **语音**：朗读提示，方便眼睛看着人而不是屏幕；同一条提示 5 秒内不重复，安卓还会配合震动。开关会记住。
 
 调试参数：`?debug=1` 显示关键点骨架与尺寸；`?mock=1&variant=ok_full` 用合成姿态演示，不打开相机。
 
@@ -35,4 +36,4 @@ python -m http.server 8000
 - MediaPipe Tasks Vision 0.10.14（Apache-2.0）
 - MediaPipe Pose Landmarker lite 模型（Apache-2.0）
 
-完整许可见 `NOTICE`。首次加载约 25 MB，之后走浏览器缓存。
+完整许可见 `NOTICE`。首次加载约 15 MB，之后走浏览器缓存。

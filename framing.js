@@ -171,6 +171,16 @@ export function targetBox(mode, W, H) {
   return { x: cx - w / 2, y, w, h, cx, bottom: y + h };
 }
 
+// Voice/haptic delivery policy: never read "hold", the same hint at most once
+// per 5 s, and nothing within 1.6 s of the previous line. lastAt is a plain
+// key -> timestamp map; lastAny is the previous announcement time.
+export function announceAllowed(key, now, lastAt, lastAny) {
+  if (!key || key === 'hold') return false;
+  if (now - lastAny < 1600) return false;
+  const t = lastAt[key];
+  return t == null || now - t >= 5000;
+}
+
 // Compare current body against the target box. One hint at a time.
 // hyst > 1 widens tolerances so an already-green frame does not flicker.
 export function evaluate(m, box, mode, W, H, hyst = 1) {

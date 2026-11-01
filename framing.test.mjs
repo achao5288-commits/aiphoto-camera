@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS, TARGETS,
+  announceAllowed,
 } from './framing.js';
 
 const W = 390;
@@ -131,6 +132,18 @@ for (const [variant, key] of Object.entries(cases)) {
   assert.equal(evaluate(m, box, 'full', W, H).key, 'too_close');
   // Hysteresis: an already-green frame survives a 20% overshoot.
   assert.equal(evaluate(m, box, 'full', W, H, 1.2).key, 'ok');
+}
+
+// --- voice/haptic cooldown ---
+{
+  const at = Object.create(null);
+  assert.equal(announceAllowed('pan_left', 1000, at, -Infinity), true);
+  at.pan_left = 1000;
+  assert.equal(announceAllowed('pan_left', 3000, at, 1000), false); // 5 s per hint
+  assert.equal(announceAllowed('ok', 2000, at, 1000), false); // 1.6 s global gap
+  assert.equal(announceAllowed('ok', 4000, at, 1000), true);
+  assert.equal(announceAllowed('hold', 9000, at, 1000), false); // never read
+  assert.equal(announceAllowed('pan_left', 6000, at, 4000), true); // 5 s later
 }
 
 console.log('framing: all assertions passed');

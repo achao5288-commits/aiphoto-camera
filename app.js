@@ -1,5 +1,7 @@
 import { FilesetResolver, PoseLandmarker } from './vendor/vision_bundle.js';
-import { mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS } from './framing.js?v=3';
+import {
+  mapLandmarks, measure, targetBox, evaluate, mockLandmarks, HINTS, announceAllowed,
+} from './framing.js?v=4';
 
 const $ = (s) => document.querySelector(s);
 const video = $('#video');
@@ -16,6 +18,7 @@ const errorMsg = $('#errorMsg');
 const debugEl = $('#debug');
 const lockBtn = $('#lockBtn');
 const flipBtn = $('#flipBtn');
+const voiceBtn = $('#voiceBtn');
 const shutter = $('#shutter');
 const capture = $('#capture');
 const shot = $('#shot');
@@ -346,6 +349,7 @@ async function createLandmarker(onProgress) {
 }
 
 async function start() {
+  unlockSpeech();
   idle.hidden = true;
   errorScreen.hidden = true;
   if (MOCK) {
@@ -491,6 +495,63 @@ function setHint(key) {
   hintEl.hidden = false;
   hintEl.classList.toggle('ready', key === 'ok');
   hintEl.classList.toggle('warn', key === 'feet_cut' || key === 'head_cut' || key === 'no_full');
+  speak(key);
+  buzz(key);
+}
+
+// --- 语音 / 震动：眼睛看着人，不看屏幕 ---
+let voiceOn = (() => {
+  try { return localStorage.getItem('aiphoto.voice') !== '0'; } catch { return true; }
+})();
+let voiceUnlocked = false;
+const spokenAt = Object.create(null);
+let lastSpoke = -Infinity;
+
+// iOS only starts speech from a user gesture; a silent utterance in the tap
+// handler opens the audio session for every later hint.
+function unlockSpeech() {
+  if (voiceUnlocked || !('speechSynthesis' in window)) return;
+  voiceUnlocked = true;
+  say(' ');
+}
+
+function say(text) {
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN';
+    u.rate = 1.05;
+    speechSynthesis.speak(u);
+  } catch {}
+}
+
+function speak(key) {
+  if (!voiceOn || !voiceUnlocked || !('speechSynthesis' in window)) return;
+  const now = performance.now();
+  if (!announceAllowed(key, now, spokenAt, lastSpoke)) return;
+  spokenAt[key] = now;
+  lastSpoke = now;
+  say(key === 'ok' ? '可以拍了，保持住' : HINTS[key]);
+}
+
+// Chrome only allows vibrate after sticky user activation; calling it earlier
+// just fills the console with blocked-call errors.
+let userActive = false;
+for (const ev of ['pointerdown', 'keydown']) {
+  window.addEventListener(ev, () => { userActive = true; }, { once: true, capture: true });
+}
+
+function buzz(key) {
+  if (!userActive || !navigator.vibrate) return;
+  navigator.vibrate(key === 'ok' ? [40, 70, 40] : 25);
+}
+
+function setVoice(on) {
+  voiceOn = on;
+  voiceBtn.classList.toggle('on', on);
+  voiceBtn.setAttribute('aria-pressed', String(on));
+  try { localStorage.setItem('aiphoto.voice', on ? '1' : '0'); } catch {}
+  if (!on) { try { speechSynthesis.cancel(); } catch {} }
 }
 
 function resetHint() {
@@ -718,6 +779,12 @@ document.querySelectorAll('[data-mode]').forEach((btn) => {
   });
 });
 
+voiceBtn.addEventListener('click', () => {
+  unlockSpeech();
+  setVoice(!voiceOn);
+  if (voiceOn) say('语音已开启');
+});
+
 flipBtn.addEventListener('click', async () => {
   if (MOCK) {
     showToast('模拟模式不切摄像头');
@@ -734,13 +801,15 @@ flipBtn.addEventListener('click', async () => {
 window.addEventListener('resize', resize);
 window.addEventListener('orientationchange', () => setTimeout(resize, 200));
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) {
-    lastPose = null;
-    lastTs = 0;
-    lastDetect = 0;
-    resetHint();
-    if (!MOCK && stream) video.play().catch(() => {});
+  if (document.hidden) {
+    try { speechSynthesis.cancel(); } catch {}
+    return;
   }
+  lastPose = null;
+  lastTs = 0;
+  lastDetect = 0;
+  resetHint();
+  if (!MOCK && stream) video.play().catch(() => {});
 });
 window.addEventListener('pagehide', () => {
   if (stream) {
@@ -753,4 +822,5 @@ window.addEventListener('pageshow', (e) => {
 });
 
 resize();
+setVoice(voiceOn);
 if (MOCK) start();
