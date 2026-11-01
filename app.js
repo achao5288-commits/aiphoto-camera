@@ -210,7 +210,7 @@ async function fetchRange(url, start, end, retries = 2) {
 }
 
 async function downloadChunked(url, size, onProgress) {
-  const CHUNK = 1 << 20;
+  const CHUNK = 256 << 10;
   const CONC = 4;
   const out = new Uint8Array(size);
   const ranges = [];
@@ -295,6 +295,9 @@ async function downloadAsset(url, size, onProgress) {
   throw new Error(`HTTP ${probe.status}`);
 }
 
+// What the network is doing, for the loading screen to report.
+const net = { retries: 0, err: '' };
+
 async function downloadAny(urls, size, onProgress) {
   let last;
   for (const url of urls) {
@@ -302,10 +305,36 @@ async function downloadAny(urls, size, onProgress) {
       return await downloadAsset(url, size, onProgress);
     } catch (e) {
       last = e;
+      net.err = String(e?.message || e).slice(0, 40);
+      net.retries += 1;
       console.warn('download failed:', url, e);
     }
   }
   throw last;
+}
+
+// Keep the 14.5 MB of model + wasm on the device so the second visit costs no
+// network at all. iOS may evict site data after a week without a visit.
+const ASSET_CACHE = 'aiphoto-assets-v1';
+
+async function cacheGet(url) {
+  if (!('caches' in window)) return null;
+  try {
+    const res = await (await caches.open(ASSET_CACHE)).match(url);
+    if (!res) return null;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    return buf.byteLength ? buf : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cachePut(url, bytes) {
+  if (!('caches' in window)) return;
+  try {
+    const c = await caches.open(ASSET_CACHE);
+    await c.put(url, new Response(bytes));
+  } catch {}
 }
 
 async function createLandmarker(onProgress) {
@@ -324,30 +353,48 @@ async function createLandmarker(onProgress) {
   };
   const report = () => onProgress?.(prog.model + prog.wasm, prog.modelTotal + prog.wasmTotal);
 
-  let modelBuf = null;
-  let wasmBlobUrl = null;
+  let modelBuf = await cacheGet(modelUrl);
+  let wasmBuf = await cacheGet(wasmUrl);
+  if (modelBuf) prog.model = prog.modelTotal;
+  if (wasmBuf) prog.wasm = prog.wasmTotal;
+  const fromCache = !!(modelBuf && wasmBuf);
+
   const [mb, wb] = await Promise.allSettled([
-    downloadAny([modelUrl, modelMirror], prog.modelTotal, (n, t) => {
+    modelBuf ? Promise.resolve(modelBuf) : downloadAny([modelUrl, modelMirror], prog.modelTotal, (n, t) => {
       prog.model = Math.max(prog.model, n);
       prog.modelTotal = t;
       report();
     }),
-    downloadAny([wasmUrl, wasmMirror], prog.wasmTotal, (n, t) => {
+    wasmBuf ? Promise.resolve(wasmBuf) : downloadAny([wasmUrl, wasmMirror], prog.wasmTotal, (n, t) => {
       prog.wasm = Math.max(prog.wasm, n);
       prog.wasmTotal = t;
       report();
     }),
   ]);
-  if (mb.status === 'fulfilled') modelBuf = mb.value;
-  else console.warn('model prefetch failed', mb.reason);
+  if (mb.status === 'fulfilled') {
+    if (!modelBuf) {
+      modelBuf = mb.value;
+      cachePut(modelUrl, modelBuf);
+    }
+  } else {
+    console.warn('model prefetch failed', mb.reason);
+  }
   if (wb.status === 'fulfilled') {
-    wasmBlobUrl = URL.createObjectURL(new Blob([wb.value], { type: 'application/wasm' }));
+    if (!wasmBuf) {
+      wasmBuf = wb.value;
+      cachePut(wasmUrl, wasmBuf);
+    }
   } else {
     console.warn('wasm prefetch failed', wb.reason);
   }
+  const wasmBlobUrl = wasmBuf
+    ? URL.createObjectURL(new Blob([wasmBuf], { type: 'application/wasm' }))
+    : null;
+
   // Prefetch is done (or skipped); MediaPipe now compiles from memory/cache.
   onProgress?.(prog.modelTotal + prog.wasmTotal, prog.modelTotal + prog.wasmTotal);
-  if (!modelBuf || !wasmBlobUrl) {
+  if (fromCache) setPrep('正在初始化取景模型…', '已缓存，不耗流量');
+  else if (!modelBuf || !wasmBlobUrl) {
     setPrep('下载不完整，正在换备用线路…', '最多再等 60 秒，也可以直接重试');
   }
 
@@ -423,11 +470,28 @@ async function start() {
   loading.hidden = true;
   prep.hidden = false;
   setPrep('相机已就绪，正在加载取景模型…', '首次约 15 MB');
+  let moved = performance.now();
+  let lastMb = 0;
+  const stallTimer = setInterval(() => {
+    if (performance.now() - moved < 20000) return;
+    if (lastMb > 0) {
+      setPrep('网络卡住了，正在重试…', `已下载 ${lastMb.toFixed(1)} MB`
+        + (net.retries ? ` · 重试 ${net.retries} 次` : ''));
+    } else {
+      setPrep('还没收到数据，正在重试…', net.err ? `网络错误：${net.err}` : '连接不动了');
+    }
+  }, 2000);
   try {
     landmarker = await createLandmarker((done, total) => {
       const mb = (n) => (n / 1048576).toFixed(1);
-      if (done >= total) setPrep('正在初始化取景模型…', '首次加载完成后会快很多');
-      else setPrep('正在下载取景模型…', `${mb(done)} / ${mb(total)} MB`);
+      moved = performance.now();
+      lastMb = done / 1048576;
+      if (done >= total) {
+        clearInterval(stallTimer);
+        setPrep('正在初始化取景模型…', '首次加载完成后会快很多');
+      } else {
+        setPrep('正在下载取景模型…', `${mb(done)} / ${mb(total)} MB`);
+      }
     });
   } catch (e) {
     prep.hidden = true;
@@ -435,6 +499,8 @@ async function start() {
     showError('取景模型加载失败：' + (e?.message || e)
       + '。首次需要下载约 15 MB，请检查网络后重试，或换 Wi-Fi。');
     return;
+  } finally {
+    clearInterval(stallTimer);
   }
 
   await video.play().catch(() => {});

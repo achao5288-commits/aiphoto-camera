@@ -36,4 +36,4 @@ python -m http.server 8000
 - MediaPipe Tasks Vision 0.10.14（Apache-2.0）
 - MediaPipe Pose Landmarker lite 模型（Apache-2.0）
 
-完整许可见 `NOTICE`。首次加载约 15 MB，之后走浏览器缓存。
+完整许可见 `NOTICE`。首次加载约 15 MB，之后模型与 wasm 存在浏览器 Cache Storage 里，不再走网络（iOS 对无访问的站点数据有空闲清理，隔很久再打开可能重新下载）。
